@@ -4,9 +4,9 @@ from datetime import datetime, timedelta
 API_FILE_PATH = "OpenWeatherMap Api Key.txt"
 REQUEST_COUNT_FILE_PATH = "Request Count.json"
 
-BUCKET_NAME = "OpenWeatherMap"
-OBJECT_KEY = "OpenWeatherMap.json"
-AWS_REGION = "Singapore" 
+BUCKET_NAME = "open-weather-map-jayathu"
+OBJECT_KEY = f"transformed-weather-data-{datetime.utcnow().isoformat()}.json"
+AWS_REGION = "ap-southeast-1" 
 
 # Initializing the S3 client 
 s3 = boto3.client("s3", region_name=AWS_REGION)
@@ -44,13 +44,28 @@ def increment_request_count():
     data["Request Count"] += 1
     save_request_data(data)
 
+# Transforming the data received by the API
+def transform_data(raw_data):
+    transformed_data = {
+            "location": raw_data["name"],
+            "temperature": raw_data["main"]["temp"],
+            "humidity": raw_data["main"]["humidity"],
+            "timestamp": datetime.utcnow().isoformat(),
+            }
+
+    return transformed_data
+
 # Uploads the JSON data into the specified S3 bucket
 def upload_to_bucket(data, bucket=BUCKET_NAME, key=OBJECT_KEY):
     json_string = json.dumps(data, indent=4)
-    s3.put_object(Bucket=bucket, Key=key, Body=json_string, ContentType="application/json")
+    try:
+        s3.put_object(Bucket=bucket, Key=key, Body=json_string, ContentType="application/json")
+    except:
+        print("The file was not found")
 
 
-API_key = open(API_FILE_PATH, "r").read()
+# API_key = open(API_FILE_PATH, "r").read()
+API_key = "b07741965fb0475a75e7c78ded9a2c91" 
 root_url = "http://api.openweathermap.org/data/2.5/weather?"
 
 location = "Colombo"
@@ -59,7 +74,9 @@ url = f"{root_url}appid={API_key}&q={location}"
 request = requests.get(url)
 increment_request_count()
 data = request.json()
-
 # the if statement checks if the response from OpenWeatherMap API is successful
 if data["cod"] == 200:
-    upload_to_bucket(data) 
+    # uploading the transformed data into a bucket
+    upload_to_bucket(transform_data(data)) 
+else:
+    print("There must be something wrong with the API key")
