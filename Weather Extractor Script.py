@@ -64,8 +64,7 @@ def upload_to_bucket(data, bucket=BUCKET_NAME, key=OBJECT_KEY):
         print("The file was not found")
 
 
-# API_key = open(API_FILE_PATH, "r").read()
-API_key = "b07741965fb0475a75e7c78ded9a2c91" 
+API_key = open(API_FILE_PATH, "r").read().strip()
 root_url = "http://api.openweathermap.org/data/2.5/weather?"
 
 location = "Colombo"
