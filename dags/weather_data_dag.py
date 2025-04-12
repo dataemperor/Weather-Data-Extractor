@@ -23,6 +23,21 @@ s3 = boto3.client("s3", region_name=AWS_REGION,
                   endpoint_url=LOCALSTACK_ENDPOINT,
                   aws_access_key_id='test', aws_secret_access_key='test')
 
+"""
+Variables used to test how long each task takes
+Used to record the starting and ending times of a task
+NOTE:
+    A value of -1 indicates that the variable was either
+    Not Reached
+    or modifying the value was a failure
+"""
+fetching_start, fetching_end = -1, -1
+transform_start, transform_end = -1, -1
+upload_start, upload_end = -1, -1
+
+# used to indicate whether a task has succeeded or not
+fetch_success, transform_success, upload_success = False, False, False
+
 
 def load_request_data():
     """
