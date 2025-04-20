@@ -2,10 +2,10 @@
 from datetime import timedelta, datetime
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.sensors.python import PythonSensor
 import requests
 import json
 import boto3
-import os
 
 # File paths to the API key and request count
 API_FILE_PATH = "/home/dataemperor/projects/Weather-Data-Extractor/OpenWeatherMap Api Key.txt"
@@ -13,7 +13,7 @@ REQUEST_COUNT_FILE_PATH = "Request Count.json"
 
 # For OpenWeatherMap
 ROOT_URL = "http://api.openweathermap.org/data/2.5/weather?"
-LOCATION = "Colombo"
+LOCATION = "Santiago"
 
 # Config for AWS/Localstack
 BUCKET_NAME = "open-weather-map-jayathu"
@@ -22,6 +22,21 @@ LOCALSTACK_ENDPOINT = "http://localhost:4566"
 s3 = boto3.client("s3", region_name=AWS_REGION,
                   endpoint_url=LOCALSTACK_ENDPOINT,
                   aws_access_key_id='test', aws_secret_access_key='test')
+
+"""
+Variables used to test how long each task takes
+Used to record the starting and ending times of a task
+NOTE:
+    A value of -1 indicates that the variable was either
+    Not Reached
+    or modifying the value was a failure
+"""
+fetching_start, fetching_end = -1, -1
+transform_start, transform_end = -1, -1
+upload_start, upload_end = -1, -1
+
+# used to indicate whether a task has succeeded or not
+fetch_success, transform_success, upload_success = False, False, False
 
 
 def load_request_data():
@@ -77,15 +92,18 @@ def fetch_weather_data(**kwargs):
 
     # sending a request to the API
     response = requests.get(url)
+    fetching_start = datetime.utcnow().isoformat()
     increment_request_count()
     data = response.json()
 
     if data["cod"] == 200:
         kwargs['ti'].xcom_push(key="weather_data", value=data)
+        fetching_end = datetime.utcnow().isoformat()
+        print(f"Fetching started at {fetching_start} "
+              f"and ended at {fetching_end}")
     else:
         raise Exception("The request to OpenWeatherMap API has failed," +
-                        "most likely an issue with the API Key or what" +
-                        "is being sent as the API key")
+                        "most likely an issue with the API Key or request")
 
 
 def transform_data(**kwargs):
@@ -94,6 +112,7 @@ def transform_data(**kwargs):
     """
     ti = kwargs['ti']
     raw_data = ti.xcom_pull(key="weather_data", task_ids="fetch_weather_data")
+    transform_start = datetime.utcnow().isoformat()
 
     transformed_data = {
         "location": raw_data["name"],
@@ -102,7 +121,26 @@ def transform_data(**kwargs):
         "timestamp": datetime.utcnow().isoformat(),
     }
 
+    transform_end = datetime.utcnow().isoformat()
     ti.xcom_push(key="transformed_data", value=transformed_data)
+    print(f"Transforming started at {transform_start} "
+          f"and ended at {transform_end}")
+
+
+def create_bucket(bucket_name):
+    """
+    Checking if bucket with BUCKET_NAME exists
+    and if it doesn't, creating a new bucket with BUCKET_NAME
+    """
+    try:
+        # checks if a bucket iwth BUCKET_NAME exists
+        s3.head_bucket(Bucket=bucket_name)
+    except s3.exceptions.ClientError:
+        print(f"{bucket_name} doesn't exist, creating {bucket_name}")
+        s3.create_bucket(Bucket=bucket_name,
+                         CreateBucketConfiguration={
+                             'LocationConstraint': f'{AWS_REGION}'
+                         })
 
 
 def upload_to_s3(**kwargs):
@@ -112,6 +150,9 @@ def upload_to_s3(**kwargs):
     ti = kwargs['ti']
     transformed_data_upload = ti.xcom_pull(key="transformed_data",
                                            task_ids="transform_data")
+    upload_start = datetime.utcnow().isoformat()
+    # creates bucket if it doesn't already exist
+    create_bucket(BUCKET_NAME)
 
     OBJECT_KEY = (
         f"transformed-weather-data-{datetime.utcnow().isoformat()}.json"
@@ -121,22 +162,38 @@ def upload_to_s3(**kwargs):
         s3.put_object(Bucket=BUCKET_NAME, Key=OBJECT_KEY,
                       Body=json_string, ContentType="application/json")
         print(f"Uploaded file to S3: {OBJECT_KEY}")
+        ti.xcom_push(key="OBJECT_KEY", value=OBJECT_KEY)
+        upload_end = datetime.utcnow().isoformat()
+        print(f"Uploading started at {upload_start} and ended at {upload_end}")
     except Exception as e:
         print(f"Upload failed: {e}")
+
+
+def check_bucket(**kwargs):
+    """
+    checks if the uploaded object is inside the bucket
+    """
+    key = kwargs['ti'].xcom_pull(key='OBJECT_KEY', task_ids="upload_to_s3")
+    try:
+        s3.head_object(Bucket=BUCKET_NAME, Key=key)
+        return True
+    except Exception as e:
+        print(f"Check bucket failed: {e}")
+        return False
 
 
 default_args = {
     'owner': 'Jayathu Fernando',
     'start_date': datetime(2025, 3, 29),
     'retries': 3,
-    'retry_delay': timedelta(minutes=5)
+    'retry_delay': timedelta(minutes=1)
 }
 
 with DAG('weather_data_dag',
          default_args=default_args,
          description='OpenWeather Data Extractor DAG',
          # runs every hour
-         schedule='0 * * * *',
+         schedule_interval='@hourly',
          # doesn't make up for any intervals between start_date and deployment
          catchup=False,
          tags=['weather', 'OpenWeatherMap', 'OpenWeather',
@@ -155,5 +212,13 @@ with DAG('weather_data_dag',
         task_id="upload_to_s3",
         python_callable=upload_to_s3)
 
+    check_bucket_task = PythonSensor(
+        task_id="check_bucket",
+        python_callable=check_bucket,
+        mode="poke",
+        poke_interval=50,
+        timeout=100,
+        dag=weather_data_dag)
+
 # dependencies
-fetch_weather_data_task >> transform_data_task >> upload_to_s3_task
+fetch_weather_data_task >> transform_data_task >> upload_to_s3_task >> check_bucket_task
